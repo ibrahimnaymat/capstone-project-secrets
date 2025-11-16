@@ -35,9 +35,9 @@ jobs:
         working-directory: ./app
         run: npm test || echo "No tests provided"
 
-      # Build Docker image using Dockerfile in root and context as ./app
+      # Build Docker image (Dockerfile inside app/)
       - name: Build Docker Image
-        run: docker build -t ${{ secrets.DOCKERHUB_USER }}/capstone:${{ github.sha }} -f ./Dockerfile ./app
+        run: docker build -t ${{ secrets.DOCKERHUB_USER }}/capstone:${{ github.sha }} ./app
 
       # Install Trivy for security scanning
       - name: Install Trivy
