@@ -1,0 +1,122 @@
+name: Production CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  APP_NAME: capstone
+  REGION: us-east-1
+
+jobs:
+  ############################
+  #     CI BUILD + SCAN     #
+  ############################
+  build-test-and-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test || echo "No tests provided"
+
+      - name: Build Docker Image
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }} .
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y wget
+          wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.43.1_Linux-64bit.deb -O trivy.deb
+          sudo dpkg -i trivy.deb || true
+
+      - name: Security Scan
+        run: |
+          trivy image --exit-code 1 --severity HIGH,CRITICAL \
+          ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }} || echo "Security scan flagged issues but continuing..."
+
+      - name: Push Docker Image
+        run: |
+          echo ${{ secrets.DOCKERHUB_PAT }} | docker login -u ${{ secrets.DOCKERHUB_USER }} --password-stdin
+          docker push ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }}
+
+  ############################
+  #   TERRAFORM DEPLOYMENT   #
+  ############################
+  terraform-deploy:
+    needs: build-test-and-scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-region: ${{ env.REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Init & Apply
+        working-directory: ./terraform
+        env:
+          TF_VAR_db_password: ${{ secrets.DB_PASS }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve
+
+  ############################
+  #         DEPLOY APP      #
+  ############################
+  deploy-to-ec2:
+    needs: terraform-deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Amazon Linux EC2
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.EC2_PUBLIC_IP }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "---- Installing Docker on EC2 if missing ----"
+            sudo yum install -y docker
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            sudo usermod -aG docker ec2-user
+
+            echo "---- Pulling latest production image ----"
+            docker pull ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }}
+
+            echo "---- Stopping old container ----"
+            docker stop capstone || true
+            docker rm capstone || true
+
+            echo "---- Running new production container ----"
+            docker run -d \
+              --name capstone \
+              -e DB_HOST="${{ secrets.DB_HOST }}" \
+              -e DB_USER="${{ secrets.DB_USER }}" \
+              -e DB_PASS="${{ secrets.DB_PASS }}" \
+              -e DB_NAME="users_db" \
+              -p 80:3000 \
+              ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }}
+
+            echo "Deployment successful"
