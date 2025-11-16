@@ -7,17 +7,16 @@ on:
 
 env:
   APP_NAME: capstone
-  REGION: us-east-1
 
 jobs:
   ############################
-  #     CI BUILD + SCAN     #
+  # 1. Build, Test & Scan   #
   ############################
-  build-test-and-scan:
+  build-test-scan:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Setup Node.js
@@ -32,86 +31,56 @@ jobs:
         run: npm test || echo "No tests provided"
 
       - name: Build Docker Image
-        run: |
-          docker build -t ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }} .
+        run: docker build -t ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }} .
 
-      - name: Install Trivy
+      - name: Install Trivy for security scan
         run: |
           sudo apt-get update -y
           sudo apt-get install -y wget
           wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.43.1_Linux-64bit.deb -O trivy.deb
           sudo dpkg -i trivy.deb || true
 
-      - name: Security Scan
+      - name: Run security scan
         run: |
           trivy image --exit-code 1 --severity HIGH,CRITICAL \
-          ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }} || echo "Security scan flagged issues but continuing..."
+          ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }} || echo "Scan flagged issues but continuing..."
 
-      - name: Push Docker Image
+      - name: Push Docker Image to Docker Hub
         run: |
           echo ${{ secrets.DOCKERHUB_PAT }} | docker login -u ${{ secrets.DOCKERHUB_USER }} --password-stdin
           docker push ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }}
 
   ############################
-  #   TERRAFORM DEPLOYMENT   #
+  # 2. Deploy to EC2        #
   ############################
-  terraform-deploy:
-    needs: build-test-and-scan
+  deploy-ec2:
+    needs: build-test-scan
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v3
-        with:
-          aws-region: ${{ env.REGION }}
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      - name: Terraform Init & Apply
-        working-directory: ./terraform
-        env:
-          TF_VAR_db_password: ${{ secrets.DB_PASS }}
-        run: |
-          terraform init -input=false
-          terraform apply -auto-approve
-
-  ############################
-  #         DEPLOY APP      #
-  ############################
-  deploy-to-ec2:
-    needs: terraform-deploy
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Deploy to Amazon Linux EC2
+      - name: SSH and Deploy
         uses: appleboy/ssh-action@v0.1.6
         with:
           host: ${{ secrets.EC2_PUBLIC_IP }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            echo "---- Installing Docker on EC2 if missing ----"
+            echo "---- Installing Docker ----"
             sudo yum install -y docker
             sudo systemctl start docker
             sudo systemctl enable docker
             sudo usermod -aG docker ec2-user
 
-            echo "---- Pulling latest production image ----"
+            echo "---- Pull latest Docker image ----"
             docker pull ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }}
 
-            echo "---- Stopping old container ----"
-            docker stop capstone || true
-            docker rm capstone || true
+            echo "---- Stop and remove old container ----"
+            docker stop ${{ env.APP_NAME }} || true
+            docker rm ${{ env.APP_NAME }} || true
 
-            echo "---- Running new production container ----"
+            echo "---- Run new container ----"
             docker run -d \
-              --name capstone \
+              --name ${{ env.APP_NAME }} \
               -e DB_HOST="${{ secrets.DB_HOST }}" \
               -e DB_USER="${{ secrets.DB_USER }}" \
               -e DB_PASS="${{ secrets.DB_PASS }}" \
@@ -119,4 +88,4 @@ jobs:
               -p 80:3000 \
               ${{ secrets.DOCKERHUB_USER }}/${{ env.APP_NAME }}:${{ github.sha }}
 
-            echo "Deployment successful"
+            echo "Deployment completed successfully!"
