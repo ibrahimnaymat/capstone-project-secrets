@@ -95,3 +95,4 @@ ALB terminates public traffic, EC2 is private behind the load balancer
 
 Environment variables used for sensitive configurations
 
+Public url: http://52.53.128.157/

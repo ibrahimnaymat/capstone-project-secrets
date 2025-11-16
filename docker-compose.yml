@@ -12,7 +12,7 @@ services:
       - "3306:3306"
     volumes:
       - db_data:/var/lib/mysql
-      - ./app/sql/init.sql:/docker-entrypoint-initdb.d/init.sql  # mount path inside container
+      - ./app/sql/init.sql:/docker-entrypoint-initdb.d/init.sql  # init script
 
   app:
     build: ./app
@@ -24,8 +24,11 @@ services:
       DB_USER: root
       DB_PASSWORD: password
       DB_NAME: users_db
+      PORT: 3000
     depends_on:
       - db
+    volumes:
+      - ./app/public:/app/public     #- ./app/server.js:/app/server.js   # <-- Optional: mount server.js for live code changes
 
 volumes:
   db_data:
